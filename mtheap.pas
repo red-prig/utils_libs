@@ -96,7 +96,7 @@ threadvar
 
 var
  mtGlobal:TmtGlobalList;
- _ThreadInit,_ThreadDone:TProcedure;
+ _ThreadDone:TProcedure;
 
 function load_consume(Var addr:Pointer):Pointer; inline;
 begin
@@ -359,8 +359,11 @@ begin
  Push(P);
 end;
 
+Procedure mtThreadInit; forward;
+
 Function mtGetMem(Size:PtrUint):Pointer;
 begin
+ mtThreadInit;
  if Size=0 then
  begin
   Result:=nil;
@@ -372,6 +375,7 @@ end;
 
 Function mtFreeMem(P:Pointer):PtrUint;
 begin
+ mtThreadInit;
  if Assigned(P) then
  begin
   Result:=mtFreelist^.flFreeMem(P);
@@ -443,6 +447,7 @@ end;
 
 Function Malloc(Size:PtrUint):Pointer; cdecl;
 begin
+ mtThreadInit;
  if Size=0 then
  begin
   Result:=nil;
@@ -454,6 +459,7 @@ end;
 
 Procedure Free(P:Pointer); cdecl;
 begin
+ mtThreadInit;
  if Assigned(P) then
  begin
   mtFreelist^.flFree(P);
@@ -521,15 +527,20 @@ end;
 
 Procedure mtThreadInit;
 begin
- mtFreelist:=mtGlobal.flGetList;
- mtFreelist^.Create;
- if Assigned(_ThreadInit) then _ThreadInit();
+ if mtFreelist=nil then
+ begin
+  mtFreelist:=mtGlobal.flGetList;
+  mtFreelist^.Create;
+ end;
 end;
 
 Procedure mtThreadFree;
 begin
- mtFreelist^.WaitFree;
- mtGlobal.flFreeList(mtFreelist);
+ if mtFreelist<>nil then
+ begin
+  mtFreelist^.WaitFree;
+  mtGlobal.flFreeList(mtFreelist);
+ end;
  if Assigned(_ThreadDone) then _ThreadDone();
 end;
 
@@ -537,7 +548,6 @@ Procedure Init;
 Var
  MM:TMemoryManager;
 begin
- _ThreadInit:=nil;
  _ThreadDone:=nil;
  mtGlobal.Create;
  mtThreadInit;
@@ -546,10 +556,6 @@ begin
  MM:=Default(TMemoryManager);
  GetMemoryManager(MM);
 
- _ThreadInit  :=MM.InitThread;
- _ThreadDone  :=MM.DoneThread;
-
- MM.InitThread:=@mtThreadInit;
  MM.DoneThread:=@mtThreadFree;
 
  MM.Getmem     :=@mtGetmem;
