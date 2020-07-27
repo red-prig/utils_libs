@@ -34,53 +34,57 @@ Function  Malloc(Size:PtrUint):Pointer; cdecl;
 Procedure Free(P:Pointer); cdecl;
 function  ReAlloc(P:Pointer;Size:ptruint):Pointer; cdecl;
 Function  CAlloc(unitSize,UnitCount:ptruint):Pointer; cdecl;
+function  _msize(P:Pointer):SizeUint; cdecl;
 
 implementation
 
+uses
+ LFQueue;
+
 Type
  PmtFreelist=^TmtFreelist;
+
+ TQNode_=packed object
+  next_:Pointer;
+  //some data
+ end;
+
  PQNode=^TQNode;
- TQNode=record
+ TQNode=packed object(TQNode_)
   freelist:PmtFreelist;
-  next_:PQNode;
   Size_:PtrUInt;
   //some data
  end;
 
  PQNode_m=^TQNode_m;
- TQNode_m=record
+ TQNode_m=packed object(TQNode_)
   freelist:PmtFreelist;
-  next_:PQNode;
  end;
 
- TmtFreelist=object
+ TmtFreelist=packed object(TQNode_)
   Var
-   tail_:PQNode;
-   stub:TQNode_m;
+   FQueue:TIntrusiveMPSCQueue;
    FCountFree:PtrUInt;
    FCountAlloc:PtrUInt;
-   head_:PQNode;
+   FCountCheck:PtrUInt;
    Procedure Create; inline;
-   Function  Push(Node:Pointer):Boolean;
-   Function  Pop(Var Node:Pointer):Boolean;
+   Function  Push(Node:Pointer):Boolean; inline;
+   Function  Pop(Var Node:Pointer):Boolean; inline;
    Procedure WaitFree;
    Function  flGetMem(Size:PtrUint):Pointer; inline;
    Function  flFreeMem(P:Pointer):PtrUint;   inline;
 
    Function  flMalloc(Size:PtrUint):Pointer; inline;
    Procedure flFree(P:Pointer);  inline;
-
  end;
 
- TmtGlobalList=object
- Var
-  tail_:PmtFreelist;
-  stub:PmtFreelist;
-  FmtFreelist:PmtFreelist;
-  head_:PmtFreelist;
+ TmtGlobalList=packed object
+  Var
+   FmtFreelist:PmtFreelist;
+   FCount:PtrUInt;
+   FMainQueue:TIntrusiveMPSCQueue;
+   FRareQueue:TIntrusiveMPSCQueue;
   Procedure Create; inline;
-  Function  Push(Node:PmtFreelist):Boolean;
-  Function  Pop(Var Node:PmtFreelist):Boolean;
   Procedure LazyWaitFree;
   Procedure GlobalWaitFree;
   Function  flGetList:PmtFreelist; inline;
@@ -98,81 +102,46 @@ var
  mtGlobal:TmtGlobalList;
  _ThreadDone:TProcedure;
 
-function load_consume(Var addr:Pointer):Pointer; inline;
+ _Getmem :Function(Size:ptruint):Pointer;
+ _Freemem:Function(p:pointer):ptruint;
+ _MemSize:function(p:pointer):ptruint;
+
+Function  SysGetmem(Size:ptruint):Pointer; inline;
 begin
- ReadDependencyBarrier;
- Result:=addr;
+ Result:=_Getmem(Size);
 end;
 
-Procedure store_release(Var addr:Pointer;v:Pointer); inline;
+Function  SysFreemem(p:pointer):ptruint; inline;
 begin
- WriteBarrier;
- addr:=v;
+ Result:=_Freemem(p);
 end;
 
-Procedure TmtFreelist.Create;inline;
+Function  SysMemSize(p:pointer):ptruint; inline;
+begin
+ Result:=_MemSize(p);
+end;
+
+Procedure TmtFreelist.Create; inline;
 begin
  FillChar(Self,SizeOf(Self),0);
- head_:=@stub;
- tail_:=@stub;
+ FQueue.Create;
  ReadWriteBarrier;
 end;
 
-Function TmtFreelist.Push(Node:Pointer):Boolean;
-Var
- prev:PQNode;
+Function TmtFreelist.Push(Node:Pointer):Boolean; inline;
 begin
- if not Assigned(Node) then Exit(False);
- PQNode(Node)^.next_:=nil;
- prev:=System.InterLockedExchange(head_,Node);
- store_release(prev^.next_,Node);
+ Result:=FQueue.Push(Node);
+ Assert(Result);
  System.InterLockedIncrement(Pointer(FCountFree));
- Result:=True;
 end;
 
-Function TmtFreelist.Pop(Var Node:Pointer):Boolean;
-Var
- tail,n,head:PQNode;
+Function TmtFreelist.Pop(Var Node:Pointer):Boolean; inline;
 begin
- Node:=nil;
- Result:=False;
-
- tail:=tail_;
- n:=load_consume(tail^.next_);
-
- if tail=@stub then
+ Result:=FQueue.Pop(Node);
+ if Result then
  begin
-  if n=nil then Exit;
-  store_release(tail_,n);
-  tail:=n;
-  n:=load_consume(n^.next_);
- end;
-
- if n<>nil then
- begin
-  store_release(tail_,n);
-  Node:=tail;
   System.InterLockedDecrement(Pointer(FCountFree));
-  Exit(True);
  end;
-
- head:=head_;
- if tail<>head then Exit;
-
- stub.next_:=nil;
- n:=System.InterLockedExchange(head_,@stub);
- store_release(n^.next_,@stub);
-
- n:=load_consume(tail^.next_);
-
- if n<>nil then
- begin
-  store_release(tail_,n);
-  Node:=tail;
-  System.InterLockedDecrement(Pointer(FCountFree));
-  Exit(True);
- end;
-
 end;
 
 Procedure TmtFreelist.WaitFree;
@@ -181,15 +150,17 @@ Var
  Node:Pointer;
 begin
  Node:=nil;
- rc:=FCountFree;
+ rc:=load_consume(FCountFree);
  While Pop(Node) do
  begin
   SysFreeMem(Node);
   System.InterLockedDecrement(Pointer(FCountAlloc));
+  Node:=nil;
   if rc=0 then Break;
   Dec(rc);
   if rc=0 then Break;
  end;
+ Assert(Node=nil);
 end;
 
 Function TmtFreelist.flGetMem(Size:PtrUint):Pointer; inline;
@@ -200,6 +171,7 @@ begin
  With PQNode(Result)^ do
  begin
   freelist:=@self;
+  Assert(freelist<>nil);
   Size_:=Size;
   store_release(next_,nil);
  end;
@@ -259,80 +231,57 @@ end;
 
 Procedure TmtGlobalList.Create; inline;
 begin
- FillChar(Self,SizeOf(Self),0);
- head_:=@stub;
- tail_:=@stub;
- ReadWriteBarrier;
-end;
-
-Function TmtGlobalList.Push(Node:PmtFreelist):Boolean;
-Var
- prev:PmtFreelist;
-begin
- if not Assigned(Node) then Exit(False);
- Node^.stub.freelist:=nil;
- prev:=System.InterLockedExchange(head_,Node);
- store_release(prev^.stub.freelist,Node);
- Result:=True;
-end;
-
-Function TmtGlobalList.Pop(Var Node:PmtFreelist):Boolean;
-Var
- tail,n,head:PmtFreelist;
-begin
- Node:=nil;
- Result:=False;
-
- tail:=tail_;
- n:=load_consume(tail^.stub.freelist);
-
- if tail=@stub then
- begin
-  if n=nil then Exit;
-  store_release(tail_,n);
-  tail:=n;
-  n:=load_consume(n^.stub.freelist);
- end;
-
- if n<>nil then
- begin
-  store_release(tail_,n);
-  Node:=tail;
-  Exit(True);
- end;
-
- head:=head_;
- if tail<>head then Exit;
-
- n:=System.InterLockedExchange(head_,@stub);
- store_release(n^.stub.freelist,@stub);
-
- n:=load_consume(tail^.stub.freelist);
-
- if n<>nil then
- begin
-  store_release(tail_,n);
-  Node:=tail;
-  Exit(True);
- end;
-
+ FmtFreelist:=nil;
+ FCount:=0;
+ FMainQueue.Create;
+ FRareQueue.Create;
 end;
 
 Procedure TmtGlobalList.LazyWaitFree;
 Var
  Node:PmtFreelist;
+ rc:PtrUInt;
 begin
  Node:=nil;
  if FmtFreelist=mtFreelist then
- if Pop(Node) then
  begin
-  Node^.WaitFree;
-  if Node^.FCountAlloc=0 then
+
+  if FRareQueue.Pop(Node) then
   begin
-   SysFreeMem(Node);
-  end else
+   Node^.WaitFree;
+   if (load_consume(Node^.FCountAlloc)=0) and
+      (load_consume(Node^.FCountFree )=0) then
+   begin
+    SysFreeMem(Node);
+   end else
+   begin
+    FRareQueue.Push(Node);
+   end;
+  end;
+
+  rc:=load_consume(FCount);
+  while FMainQueue.Pop(Node) do
   begin
-   Push(Node);
+   Node^.WaitFree;
+   if (load_consume(Node^.FCountAlloc)=0) and
+      (load_consume(Node^.FCountFree )=0) then
+   begin
+    System.InterLockedDecrement(Pointer(FCount));
+    SysFreeMem(Node);
+   end else
+   begin
+    if PtrUint(System.InterLockedIncrement(Pointer(Node^.FCountCheck)))>2 then
+    begin
+     System.InterLockedDecrement(Pointer(FCount));
+     FRareQueue.Push(Node);
+    end else
+    begin
+     FMainQueue.Push(Node);
+    end;
+   end;
+   if rc=0 then Break;
+   Dec(rc);
+   if rc=0 then Break;
   end;
  end;
 end;
@@ -342,7 +291,13 @@ Var
  Node:PmtFreelist;
 begin
  Node:=nil;
- While Pop(Node) do
+ While FMainQueue.Pop(Node) do
+ begin
+  Node^.WaitFree;
+  System.InterLockedDecrement(Pointer(FCount));
+  SysFreeMem(Node);
+ end;
+ While FRareQueue.Pop(Node) do
  begin
   Node^.WaitFree;
   SysFreeMem(Node);
@@ -356,7 +311,8 @@ end;
 
 Procedure TmtGlobalList.flFreeList(P:PmtFreelist); inline;
 begin
- Push(P);
+ FMainQueue.Push(P);
+ System.InterLockedIncrement(Pointer(FCount));
 end;
 
 Procedure mtThreadInit; forward;
@@ -467,7 +423,7 @@ begin
  mtGlobal.LazyWaitFree;
 end;
 
-Function cMemSize(P:pointer):ptruint;
+function _msize(P:Pointer):SizeUint; cdecl;
 begin
  Result:=0;
  if PtrUint(P)>node_size_m then
@@ -493,7 +449,7 @@ begin
  if Size>0 then
  begin
 
-  S:=cMemSize(P);
+  S:=_msize(P);
   if (S-(S div 3)>Size) then
   begin
    Result:=Malloc(Size);
@@ -548,13 +504,18 @@ Procedure Init;
 Var
  MM:TMemoryManager;
 begin
- _ThreadDone:=nil;
+ MM:=Default(TMemoryManager);
+ GetMemoryManager(MM);
+
+ _ThreadDone:=MM.DoneThread;
+
+ _Getmem    :=MM.Getmem;
+ _Freemem   :=MM.Freemem;
+ _MemSize   :=MM.MemSize;
+
  mtGlobal.Create;
  mtThreadInit;
  mtGlobal.FmtFreelist:=mtFreelist;
-
- MM:=Default(TMemoryManager);
- GetMemoryManager(MM);
 
  MM.DoneThread:=@mtThreadFree;
 
