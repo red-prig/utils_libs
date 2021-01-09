@@ -190,13 +190,13 @@ begin
 end;
 
 {$IFDEF CPU386}
-Procedure fetch_xor(var Target:SizeUInt;mask:SizeUInt); assembler;
+Procedure fetch_xor(var Target:SizeUInt;mask:SizeUInt); assembler; nostackframe;
 asm
  lock xor [eax],edx
 end;
 {$ELSE}
 {$IFDEF CPUX86_64}
-Procedure fetch_xor(var Target:SizeUInt;mask:SizeUInt); assembler;
+Procedure fetch_xor(var Target:SizeUInt;mask:SizeUInt); assembler; nostackframe;
 asm
  lock xor [rcx],rdx
 end;
@@ -222,13 +222,13 @@ begin
 end;
 
 {$IFDEF CPU386}
-Procedure fetch_or(var Target:SizeUInt;mask:SizeUInt); assembler;
+Procedure fetch_or(var Target:SizeUInt;mask:SizeUInt); assembler; nostackframe;
 asm
  lock xor [eax],edx
 end;
 {$ELSE}
 {$IFDEF CPUX86_64}
-Procedure fetch_or(var Target:SizeUInt;mask:SizeUInt); assembler;
+Procedure fetch_or(var Target:SizeUInt;mask:SizeUInt); assembler; nostackframe;
 asm
  lock xor [rcx],rdx
 end;
@@ -254,13 +254,13 @@ begin
 end;
 
 {$IFDEF CPU386}
-Procedure fetch_and(var Target:SizeUInt;mask:SizeUInt); assembler;
+Procedure fetch_and(var Target:SizeUInt;mask:SizeUInt); assembler; nostackframe;
 asm
  lock and [eax],edx
 end;
 {$ELSE}
 {$IFDEF CPUX86_64}
-Procedure fetch_and(var Target:SizeUInt;mask:SizeUInt); assembler;
+Procedure fetch_and(var Target:SizeUInt;mask:SizeUInt); assembler; nostackframe;
 asm
  lock and [rcx],rdx
 end;
@@ -319,10 +319,8 @@ begin
  Result:=SizeUInt(P) and SizeUInt(1);
 end;
 
-{$push}
-{$ASMMODE Intel}
-{$IFDEF CPU386 or CPUX86_64}
-procedure spin_pause; assembler;
+{$if defined(CPU386) or defined(CPUX86_64)}
+procedure spin_pause; assembler; nostackframe;
 asm
  pause
 end;
@@ -331,7 +329,6 @@ procedure spin_pause; inline;
 begin
 end;
 {$ENDIF}
-{$pop}
 
 function spin_trylock(Var P:Pointer):Boolean; inline;
 begin
