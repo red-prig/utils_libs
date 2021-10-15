@@ -302,6 +302,7 @@ begin
    if InitializeSRWLock<>nil then
    begin
     InitializeSRWLock(L.SRWLock);
+    L.Mode:=0;
    end else
   {$ENDIF}
    begin
@@ -396,6 +397,7 @@ begin
  {$ELSE}
   {$IF DEFINED(WINDOWS) and (not DEFINED(SMART))}
    if InitializeSRWLock<>nil then
+   if L.SRWLock<>nil then
    begin
     Case L.Mode of
      1:ReleaseSRWLockShared(L.SRWLock);
