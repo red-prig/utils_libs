@@ -1,4 +1,4 @@
-{ Implimentation of Slim read-write lock based on https://github.com/neosmart/RWLock
+{ Implementation of Slim read-write lock based on https://github.com/neosmart/RWLock
 
   Copyright (C) 2018-2020 Red_prig
 
